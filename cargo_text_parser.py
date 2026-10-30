@@ -371,22 +371,58 @@ _TDOCS_EP = os.environ.get("TDOCS_ENDPOINT", "https://docs.qq.com/openapi/mcp")
 
 
 def _load_tdoc_token() -> str:
-    """优先 env，其次本目錄 .env，再 fallback 你 Desktop/mpc-sync/.env（已有 token）。"""
-    t = os.environ.get("TENCENT_DOCS_TOKEN", "").strip()
-    if t:
-        return t
-    for p in (os.path.join(os.path.dirname(__file__), ".env"),
-              r"C:\Users\ExpertFair12D2\Desktop\mpc-sync\.env"):
-        if os.path.exists(p):
-            for line in open(p, encoding="utf-8"):
+    """優先 env，其次 Streamlit secrets，再本機 .env（含 Desktop/mpc-sync/.env）。"""
+    return _read_secret("TENCENT_DOCS_TOKEN")
+
+
+# --------------------------------------------------------------------------
+# 密碼登入門（出公網時擋住閒人；密碼來源：環境變數 → Streamlit secrets → 本機 .env）
+# --------------------------------------------------------------------------
+def _read_secret(key: str) -> str:
+    """優先 env，其次 Streamlit secrets，再本機 .env。"""
+    v = os.environ.get(key, "").strip()
+    if v:
+        return v
+    try:
+        v = str(st.secrets.get(key, "")).strip()
+        if v:
+            return v
+    except Exception:
+        pass
+    for pp in (os.path.join(os.path.dirname(__file__), ".env"),
+               r"C:\Users\ExpertFair12D2\Desktop\mpc-sync\.env"):
+        if os.path.exists(pp):
+            for line in open(pp, encoding="utf-8"):
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
-                k, v = line.split("=", 1)
-                if k.strip() == "TENCENT_DOCS_TOKEN":
-                    return v.strip()
+                k, val = line.split("=", 1)
+                if k.strip() == key:
+                    return val.strip()
     return ""
 
+
+def _app_password() -> str:
+    return _read_secret("APP_PASSWORD")
+
+
+def _login_guard():
+    """未登入就只顯示密碼框；登入後先 render 主程式。"""
+    if st.session_state.get("authed"):
+        return
+    st.markdown("## 🔒 登入")
+    st.caption("此工具可寫入客戶騰訊文檔，請輸入密碼先使用。")
+    pw = st.text_input("密碼", type="password", key="login_pw")
+    if st.button("登入", type="primary"):
+        correct = _app_password()
+        if not correct:
+            st.error("⚠️ 尚未設定 APP_PASSWORD：請於環境變數 / Streamlit secrets / 本機 .env 加一行 APP_PASSWORD=你的密碼，先可以使用。")
+        elif pw == correct:
+            st.session_state["authed"] = True
+            st.rerun()
+        else:
+            st.error("密碼錯誤")
+    st.stop()
 
 class TencentDocsMCP:
     """极简 MCP client：initialize + tools/call。对应 sync.js 嘅 rpc/mcp。"""
@@ -894,6 +930,10 @@ def _match_inout(v) -> str:
 def main():
     st.set_page_config(page_title="信杰對單 · 客戶格式自動填格", layout="wide")
     st.title("📋 客戶單據「貼上即填格」")
+    _login_guard()  # 未登入只顯示密碼框
+    if st.sidebar.button("🚪 登出", help="測試密碼門用；登出後要再打密碼"):
+        st.session_state["authed"] = False
+        st.rerun()
     st.caption("客戶按統一表格格式填（騰訊文檔）→ 同事貼入 / 直接讀文檔 → 自動拆字段填格 → 路由到客戶專用文檔")
 
     # ① 客戶選擇（路由到該客戶專用文檔）
@@ -906,7 +946,7 @@ def main():
         sel = st.selectbox("客戶", clients["client_name"].tolist(), key="client_sel")
         _selrow = clients[clients["client_name"] == sel]
         if _selrow.empty:
-            # 下拉仲记住已刪除/已改名嘅舊客戶 → 暫用第一個客戶，唔好爆錯
+            # 下拉仲記住已刪除/已改名嘅舊客戶 → 暫用第一個客戶，唔好爆錯
             st.caption(f"⚠️ 之前揀嘅「{sel}」已經唔存在（刪咗或改咗名），暫用第一個客戶，請重新揀。")
             _selrow = clients.iloc[[0]]
         crow = _selrow.iloc[0]
@@ -954,7 +994,7 @@ def main():
                 st.session_state["nc_tid"] = sheets[labels.index(p)]["sheet_id"]
 
         if sheets:
-            st.selectbox("揀要写嘅子表（揀完自動填落 tab_id）", labels, key="sheet_pick", on_change=_pick_sheet)
+            st.selectbox("揀要填既子表（揀完自動填落 tab_id）", labels, key="sheet_pick", on_change=_pick_sheet)
             if st.session_state.get("nc_tid"):
                 st.caption(f"✅ tab_id 已自動填：`{st.session_state['nc_tid']}`")
         nc_tid = st.text_input("子表 tab_id（揀上面會自動填，也可手填）", value=st.session_state.get("nc_tid", ""), key="nc_tid")
@@ -971,7 +1011,7 @@ def main():
                     st.warning("客戶名 同 file_id 必填")
                 else:
                     tid = nc_tid.strip()
-                    if not tid and sheets:  # 冇手填 tab_id 就用上面揀嘅子表
+                    if not tid and sheets:  # 冇手填 tab_id 就用上面揀既子表
                         p = st.session_state.get("sheet_pick", "")
                         if p in labels:
                             tid = sheets[labels.index(p)]["sheet_id"]
@@ -1052,7 +1092,7 @@ def main():
             df.columns = [label for _, label in ITEM_COLS]
             df = df.fillna("")  # 空格顯示空白，唔好出 None
 
-            # 進出：格內照顯示客戶原字（點一下格就有下拉）；上面再俾個永遠見到嘅下拉快速套用
+            # 進出：格內照顯示客戶原字（點一下格就有下拉）；上面再俾個永遠見到既下拉快速套用
             _QUICK_NONE = "（唔改——保留客戶原字）"
 
             def _quick_inout_changed():
@@ -1098,9 +1138,9 @@ def main():
                 st.json(payload)
                 st.code(json.dumps(payload, ensure_ascii=False, indent=2), language="json")
 
-            # ⑦ 自动写回客户专用文档（append 到最尾，唔覆盖舊資料）
-            st.markdown("### ⑦ 自动写回客户专用文档")
-            st.caption(f"目标：{client_doc_url(cfid, ctid)}　（加喺最尾，唔會覆盖舊資料）")
+            # ⑦ 自動寫回客户專用文檔（append 到最尾，唔覆蓋舊資料）
+            st.markdown("### ⑦ 自動寫回客户專用文檔")
+            st.caption(f"目標：{client_doc_url(cfid, ctid)}　（加係最尾，唔會覆蓋舊資料）")
             prev_rows = build_doc_rows(h, items_for_write, ccols)
             hdr = _target_header_cached(cfid, ctid) if ctid else []
             if hdr and len(hdr) == len(prev_rows[0]):
@@ -1111,11 +1151,11 @@ def main():
                          use_container_width=True, hide_index=True)
             if not hdr:
                 st.caption("（攞唔到目標表頭，上面欄名暫以 欄1/欄2… 顯示）")
-            confirm = st.checkbox("✅ 确认上面嘅行写落个客户文檔（加喺最尾）", key="confirm_write")
-            if st.button("📤 写回文档", type="primary", disabled=not confirm, use_container_width=True):
+            confirm = st.checkbox("✅ 確認上面既行寫落客户文檔（加喺最尾）", key="confirm_write")
+            if st.button("📤 寫回文檔", type="primary", disabled=not confirm, use_container_width=True):
                 try:
                     start = write_items_to_doc(cfid, ctid, h, items_for_write, ccols)
-                    st.success(f"✅ 已写落 {len(items_for_write)} 行（由第 {start + 1} 行开始）。去文檔核对下。")
+                    st.success(f"✅ 已寫落 {len(items_for_write)} 行（由第 {start + 1} 行开始）。去文檔核對下。")
                     st.session_state.pop("confirm_write", None)
                 except Exception as e:
                     st.error(str(e))
